@@ -20,3 +20,15 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+foodordering/build/
+foodordering/.dart_tool/
+foodordering/.flutter-plugins
+foodordering/.flutter-plugins-dependencies
