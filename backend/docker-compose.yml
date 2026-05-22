@@ -1,0 +1,191 @@
+version: '3.9'
+
+# ─── Shared env that every service needs ──────────────────────────────────────
+x-common-env: &common-env
+  JWT_SECRET: ${JWT_SECRET}
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+
+# ─── Internal service URLs (use container names as hostnames) ─────────────────
+x-service-urls: &service-urls
+  RESTAURANT_SERVICE_URL: http://restaurant-service:5002
+  RIDER_SERVICE_URL: http://rider-service:5005
+  REALTIME_SERVICE_URL: http://realtime-service:5004
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  mongo:
+    image: mongo:7-jammy
+    container_name: food-mongo
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-secret}
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.runCommand("ping").ok']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: food-rabbitmq
+    restart: unless-stopped
+    ports:
+      - '5672:5672'    # AMQP protocol
+      - '15672:15672'  # Management dashboard → http://localhost:15672 (guest/guest)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Microservices ────────────────────────────────────────────────────────────
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: food-gateway
+    restart: unless-stopped
+    ports:
+      - '5000:5000'   # ← Flutter app talks to this single port only
+    environment:
+      PORT: 5000
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      AUTH_SERVICE_URL: http://auth-service:5001
+      RESTAURANT_SERVICE_URL: http://restaurant-service:5002
+      UTILS_SERVICE_URL: http://utils-service:5003
+      REALTIME_SERVICE_URL: http://realtime-service:5004
+      RIDER_SERVICE_URL: http://rider-service:5005
+      ADMIN_SERVICE_URL: http://admin-service:5006
+    depends_on:
+      - auth-service
+      - restaurant-service
+      - utils-service
+      - realtime-service
+      - rider-service
+      - admin-service
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: food-auth
+    restart: unless-stopped
+    ports:
+      - '5001:5001'
+    environment:
+      <<: *common-env
+      PORT: 5001
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongo:27017/auth-service?authSource=admin
+      JWT_EXPIRES_SECONDS: ${JWT_EXPIRES_SECONDS:-900}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  restaurant-service:
+    build:
+      context: ./restaurant-service
+      dockerfile: Dockerfile
+    container_name: food-restaurant
+    restart: unless-stopped
+    ports:
+      - '5002:5002'
+    environment:
+      <<: [*common-env, *service-urls]
+      PORT: 5002
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongo:27017/restaurant-service?authSource=admin
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  utils-service:
+    build:
+      context: ./utils-service
+      dockerfile: Dockerfile
+    container_name: food-utils
+    restart: unless-stopped
+    ports:
+      - '5003:5003'
+    environment:
+      <<: [*common-env, *service-urls]
+      PORT: 5003
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
+      PAYSTACK_PUBLIC_KEY: ${PAYSTACK_PUBLIC_KEY}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+
+  realtime-service:
+    build:
+      context: ./realtime-service
+      dockerfile: Dockerfile
+    container_name: food-realtime
+    restart: unless-stopped
+    ports:
+      - '5004:5004'
+    environment:
+      <<: *common-env
+      PORT: 5004
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  rider-service:
+    build:
+      context: ./rider-service
+      dockerfile: Dockerfile
+    container_name: food-rider
+    restart: unless-stopped
+    ports:
+      - '5005:5005'
+    environment:
+      <<: [*common-env, *service-urls]
+      PORT: 5005
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongo:27017/rider-service?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  admin-service:
+    build:
+      context: ./admin-service
+      dockerfile: Dockerfile
+    container_name: food-admin
+    restart: unless-stopped
+    ports:
+      - '5006:5006'
+    environment:
+      <<: [*common-env, *service-urls]
+      PORT: 5006
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongo:27017/admin-service?authSource=admin
+      JWT_EXPIRES_SECONDS: ${JWT_EXPIRES_SECONDS:-900}
+      ADMIN_SEED_SECRET: ${ADMIN_SEED_SECRET}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  rabbitmq_data:
